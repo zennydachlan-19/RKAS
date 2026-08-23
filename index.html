@@ -1,0 +1,883 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RKAS &amp; Realisasi — Sistem Keuangan Sekolah</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,600;8..60,700&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+  * { box-sizing: border-box; }
+  html, body, #root { height: 100%; margin: 0; }
+  body { background: #FAF8F3; font-family: 'IBM Plex Sans', system-ui, sans-serif; color: #1C2B24; }
+  input, select { font-family: inherit; }
+  ::selection { background: #1F6F5033; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useCallback, useMemo, useRef } = React;
+
+/* ================= konstanta ================= */
+const CATEGORIES = [
+  { key: "honor", label: "Honor", icon: "💼", limitType: "max", limitPct: 20,
+    contoh: "guru honorer, staf, pengawas ujian, narasumber, panitia, kebersihan, keamanan, jasa tenaga, pembina" },
+  { key: "asetTetap", label: "Aset Tetap Lainnya", icon: "🟠", limitType: "min", limitPct: 10,
+    contoh: "buku, rak, meja, kursi, lemari, papan tulis, alat laboratorium, peraga, alat olahraga, alat kesenian, printer, perabot" },
+  { key: "aset", label: "Aset", icon: "🔵", limitType: "none",
+    contoh: "tanah, gedung, bangunan, kendaraan, bus sekolah, lisensi, perangkat lunak" },
+  { key: "mesin", label: "Mesin", icon: "🟣", limitType: "none",
+    contoh: "komputer, laptop, server, fotokopi, proyektor, pompa air, genset, alat elektronik" },
+  { key: "operasional", label: "Operasional", icon: "📈", limitType: "none",
+    contoh: "listrik, air, internet, telepon, ATK, kertas, pulpen, map, kebersihan, langganan, administrasi bank" },
+  { key: "barangJasa", label: "Barang dan Jasa", icon: "🛒", limitType: "none",
+    contoh: "bahan baku, praktik, seragam, buku paket, LKS, modul, sewa tempat, transportasi, jasa" },
+  { key: "pemeliharaan", label: "Pemeliharaan", icon: "🔧", limitType: "max", limitPct: 20,
+    contoh: "perbaikan, servis, cat, pintu, jendela, perawatan, suku cadang, tukang, instalasi, perbaikan gedung" },
+];
+const INCOME_SOURCES = [
+  { key: "bos", label: "Dana BOS" },
+  { key: "spp", label: "SPP Siswa" },
+  { key: "bantuan", label: "Bantuan Pemerintah / Yayasan" },
+  { key: "sumbangan", label: "Sumbangan / Donasi" },
+  { key: "lainnya", label: "Pendapatan Lainnya" },
+];
+const MONTHS = ["Januari","Februari","Maret","April","Mei","Juni","Juli","Agustus","September","Oktober","November","Desember"];
+const MONTHS_SHORT = ["Jan","Feb","Mar","Apr","Mei","Jun","Jul","Agu","Sep","Okt","Nov","Des"];
+const INACTIVITY_LIMIT_MS = 20 * 60 * 1000;
+
+const emptyPlan = () => ({
+  anggaranTahunan: 0, sem1: 0, sem2: 0, inputMode: "A",
+  pemasukan: { bos: 0, spp: 0, bantuan: 0, sumbangan: 0, lainnya: 0 },
+  pengeluaran: { honor: 0, asetTetap: 0, aset: 0, mesin: 0, operasional: 0, barangJasa: 0, pemeliharaan: 0 },
+});
+const emptyRealisasi = () => ({ pemasukan: [], pengeluaran: [] });
+
+/* ================= util ================= */
+function fmtRp(n) {
+  const num = Math.round(Number(n) || 0);
+  return "Rp. " + num.toLocaleString("id-ID");
+}
+function toNumber(str) {
+  const digits = String(str).replace(/[^\d-]/g, "");
+  return digits ? parseInt(digits, 10) : 0;
+}
+function uid() { return Math.random().toString(36).slice(2, 10); }
+function catByLabel(label) {
+  if (!label) return null;
+  const l = String(label).toLowerCase().trim();
+  return CATEGORIES.find(c => c.label.toLowerCase() === l || l.includes(c.label.toLowerCase()) || c.label.toLowerCase().includes(l)) || null;
+}
+function sourceByLabel(label) {
+  if (!label) return null;
+  const l = String(label).toLowerCase().trim();
+  return INCOME_SOURCES.find(s => s.label.toLowerCase() === l || l.includes(s.label.toLowerCase()) || s.label.toLowerCase().includes(l)) || null;
+}
+function monthIndexFromDate(dateStr) {
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return 0;
+  return d.getMonth();
+}
+function downloadCSV(filename, rows) {
+  const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+/* hash sederhana untuk kata sandi — bukan enkripsi tingkat produksi */
+function simpleHash(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) { h = (h * 31 + str.charCodeAt(i)) | 0; }
+  return String(h);
+}
+
+/* ================= lapisan penyimpanan =================
+   Memakai window.storage jika tersedia (mis. saat dibuka di dalam Claude),
+   dan otomatis beralih ke localStorage browser saat aplikasi di-deploy
+   sebagai situs mandiri (Netlify, GitHub Pages, server sendiri, dll). */
+const hasClaudeStorage = typeof window !== "undefined" && !!window.storage;
+const storage = {
+  async get(key) {
+    if (hasClaudeStorage) return window.storage.get(key, false);
+    const v = localStorage.getItem(key);
+    return v === null ? null : { key, value: v, shared: false };
+  },
+  async set(key, value) {
+    if (hasClaudeStorage) return window.storage.set(key, value, false);
+    localStorage.setItem(key, value);
+    return { key, value, shared: false };
+  },
+  async delete(key) {
+    if (hasClaudeStorage) return window.storage.delete(key, false);
+    localStorage.removeItem(key);
+    return { key, deleted: true, shared: false };
+  },
+};
+
+/* ================= komponen kecil ================= */
+function MoneyInput({ value, onChange, className = "" }) {
+  const [focused, setFocused] = useState(false);
+  const [raw, setRaw] = useState(String(value || 0));
+  useEffect(() => { if (!focused) setRaw(String(value || 0)); }, [value, focused]);
+  return (
+    <input
+      type="text" inputMode="numeric"
+      className={`tabular-nums ${className}`}
+      style={{ textAlign: "right", padding: "6px 8px", borderRadius: 6, border: "1px solid #E4DFD3", background: "#fff", outline: "none" }}
+      value={focused ? raw : fmtRp(value)}
+      onFocus={() => { setFocused(true); setRaw(String(value || "")); }}
+      onChange={e => setRaw(e.target.value)}
+      onBlur={() => { const n = toNumber(raw); setFocused(false); onChange(n); }}
+    />
+  );
+}
+function Section({ icon, title, subtitle, children, defaultOpen = true }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div style={{ borderRadius: 12, border: "1px solid #E4DFD3", background: "#fff", marginBottom: 16, overflow: "hidden" }}>
+      <button onClick={() => setOpen(o => !o)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "14px 18px", textAlign: "left", background: "transparent", border: "none", cursor: "pointer" }}>
+        <span style={{ fontSize: 20 }}>{icon}</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 600, fontFamily: "'Source Serif 4', Georgia, serif" }}>{title}</div>
+          {subtitle && <div style={{ fontSize: 12, color: "#6B6355", marginTop: 2 }}>{subtitle}</div>}
+        </div>
+        <span style={{ color: "#6B6355" }}>{open ? "▾" : "▸"}</span>
+      </button>
+      {open && <div style={{ padding: "4px 18px 20px", borderTop: "1px solid #F0EDE4" }}>{children}</div>}
+    </div>
+  );
+}
+function Warning({ type, children }) {
+  const s = type === "warn"
+    ? { bg: "#FBEAE6", border: "#C0392B", color: "#8B2E1F" }
+    : { bg: "#FCF3E3", border: "#C08A28", color: "#7A5B15" };
+  return (
+    <div style={{ display: "flex", gap: 8, borderRadius: 8, padding: "8px 12px", fontSize: 12, marginTop: 6, background: s.bg, border: `1px solid ${s.border}33`, color: s.color }}>
+      <span>{type === "warn" ? "⚠️" : "ℹ️"}</span><span>{children}</span>
+    </div>
+  );
+}
+function StatCard({ label, value, color }) {
+  return (
+    <div style={{ borderRadius: 10, padding: 14, background: "#FAF8F3", border: "1px solid #E4DFD3" }}>
+      <div style={{ fontSize: 11, color: "#6B6355", marginBottom: 4 }}>{label}</div>
+      <div style={{ fontSize: 18, fontWeight: 600, color, fontFamily: "'Source Serif 4', serif" }}>{fmtRp(value)}</div>
+    </div>
+  );
+}
+function Loading({ msg }) {
+  return <div style={{ minHeight: 300, display: "flex", alignItems: "center", justifyContent: "center", color: "#6B6355", fontSize: 14 }}>{msg}</div>;
+}
+function PrimaryBtn({ children, onClick, style }) {
+  return <button onClick={onClick} style={{ background: "#1F6F50", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontWeight: 500, fontSize: 14, cursor: "pointer", ...style }}>{children}</button>;
+}
+
+/* ================= AUTENTIKASI ================= */
+function AuthShell({ children, title }) {
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#FAF8F3", padding: 16 }}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,700&display=swap');`}</style>
+      <div style={{ width: "100%", maxWidth: 380 }}>
+        <div style={{ textAlign: "center", marginBottom: 24 }}>
+          <div style={{ width: 52, height: 52, borderRadius: 12, background: "#1F6F50", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 10px", fontFamily: "'Source Serif 4', serif", fontWeight: 700, fontSize: 22 }}>R</div>
+          <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 15, color: "#6B6355" }}>RKAS &amp; Realisasi — Sistem Keuangan Sekolah</div>
+        </div>
+        <div style={{ background: "#fff", border: "1px solid #E4DFD3", borderRadius: 14, padding: 28 }}>
+          <div style={{ fontFamily: "'Source Serif 4', serif", fontWeight: 700, fontSize: 20, marginBottom: 18, textAlign: "center" }}>{title}</div>
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+function TextField({ label, type = "text", value, onChange, optional }) {
+  return (
+    <label style={{ display: "block", marginBottom: 14, fontSize: 13 }}>
+      <div style={{ marginBottom: 5, color: "#3A362E" }}>{label}{optional && <span style={{ color: "#9A9385" }}> (opsional)</span>}</div>
+      <input type={type} value={value} onChange={e => onChange(e.target.value)}
+        style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid #E4DFD3", fontSize: 14, outline: "none" }} />
+    </label>
+  );
+}
+
+function RegisterPage({ onGoLogin, onRegistered }) {
+  const [nama, setNama] = useState(""); const [username, setUsername] = useState("");
+  const [email, setEmail] = useState(""); const [pass, setPass] = useState(""); const [pass2, setPass2] = useState("");
+  const [err, setErr] = useState(""); const [ok, setOk] = useState("");
+
+  const submit = async () => {
+    setErr(""); setOk("");
+    if (!nama.trim() || !username.trim() || !pass || !pass2) { setErr("Semua kolom wajib diisi kecuali email"); return; }
+    if (pass !== pass2) { setErr("Kata sandi tidak sama, silakan ketik ulang"); return; }
+    let accounts = [];
+    try { const r = await storage.get("auth-accounts"); accounts = r ? JSON.parse(r.value) : []; } catch (e) {}
+    if (accounts.some(a => a.username.toLowerCase() === username.toLowerCase())) { setErr("Nama pengguna sudah digunakan, pilih yang lain"); return; }
+    accounts.push({ username, nama, email, pass: simpleHash(pass) });
+    await storage.set("auth-accounts", JSON.stringify(accounts));
+    setOk("Pendaftaran berhasil! Silakan masuk menggunakan akun Anda");
+    setTimeout(() => onRegistered(username), 900);
+  };
+
+  return (
+    <AuthShell title="DAFTAR AKUN BARU">
+      <TextField label="Nama Lengkap" value={nama} onChange={setNama} />
+      <TextField label="Nama Pengguna" value={username} onChange={setUsername} />
+      <TextField label="Email" value={email} onChange={setEmail} optional />
+      <TextField label="Kata Sandi" type="password" value={pass} onChange={setPass} />
+      <TextField label="Ulangi Kata Sandi" type="password" value={pass2} onChange={setPass2} />
+      {err && <div style={{ color: "#C0392B", fontSize: 12, marginBottom: 10 }}>⚠️ {err}</div>}
+      {ok && <div style={{ color: "#1F6F50", fontSize: 12, marginBottom: 10 }}>✅ {ok}</div>}
+      <PrimaryBtn onClick={submit} style={{ width: "100%" }}>Daftar</PrimaryBtn>
+      <div style={{ textAlign: "center", fontSize: 12, color: "#6B6355", marginTop: 14 }}>
+        Sudah punya akun?{" "}
+        <a href="#" onClick={e => { e.preventDefault(); onGoLogin(); }} style={{ color: "#1F6F50", fontWeight: 500 }}>Masuk di sini</a>
+      </div>
+    </AuthShell>
+  );
+}
+
+function LoginPage({ onGoRegister, onLoggedIn }) {
+  const [id, setId] = useState(""); const [pass, setPass] = useState(""); const [err, setErr] = useState("");
+  const [forgot, setForgot] = useState(false);
+
+  const submit = async () => {
+    setErr("");
+    let accounts = [];
+    try { const r = await storage.get("auth-accounts"); accounts = r ? JSON.parse(r.value) : []; } catch (e) {}
+    const acc = accounts.find(a => (a.username.toLowerCase() === id.toLowerCase() || (a.email && a.email.toLowerCase() === id.toLowerCase())) && a.pass === simpleHash(pass));
+    if (!acc) { setErr("Nama pengguna atau kata sandi tidak sesuai"); return; }
+    await storage.set("auth-session", JSON.stringify({ username: acc.username }));
+    onLoggedIn(acc);
+  };
+
+  if (forgot) {
+    return (
+      <AuthShell title="LUPA KATA SANDI">
+        <div style={{ fontSize: 13, color: "#3A362E", marginBottom: 16, lineHeight: 1.6 }}>
+          Pemulihan kata sandi otomatis belum tersedia. Hubungi operator sekolah / admin sistem untuk mengatur ulang kata sandi akun Anda.
+        </div>
+        <PrimaryBtn onClick={() => setForgot(false)} style={{ width: "100%" }}>Kembali ke Login</PrimaryBtn>
+      </AuthShell>
+    );
+  }
+
+  return (
+    <AuthShell title="MASUK KE SISTEM">
+      <TextField label="Nama Pengguna / Email" value={id} onChange={setId} />
+      <TextField label="Kata Sandi" type="password" value={pass} onChange={setPass} />
+      {err && <div style={{ color: "#C0392B", fontSize: 12, marginBottom: 10 }}>⚠️ {err}</div>}
+      <div style={{ textAlign: "right", marginBottom: 14 }}>
+        <a href="#" onClick={e => { e.preventDefault(); setForgot(true); }} style={{ fontSize: 12, color: "#6B6355" }}>Lupa Kata Sandi?</a>
+      </div>
+      <PrimaryBtn onClick={submit} style={{ width: "100%" }}>Masuk</PrimaryBtn>
+      <div style={{ textAlign: "center", fontSize: 12, color: "#6B6355", marginTop: 14 }}>
+        Belum punya akun?{" "}
+        <a href="#" onClick={e => { e.preventDefault(); onGoRegister(); }} style={{ color: "#1F6F50", fontWeight: 500 }}>Daftar di sini</a>
+      </div>
+    </AuthShell>
+  );
+}
+
+function TopBar({ user, onLogout, onHome }) {
+  return (
+    <div style={{ borderBottom: "1px solid #E4DFD3", background: "#fff" }}>
+      <div style={{ maxWidth: 960, margin: "0 auto", padding: "12px 20px", display: "flex", alignItems: "center", gap: 12 }}>
+        <button onClick={onHome} style={{ display: "flex", alignItems: "center", gap: 10, background: "none", border: "none", cursor: "pointer", padding: 0 }}>
+          <div style={{ width: 34, height: 34, borderRadius: 8, background: "#1F6F50", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Source Serif 4', serif", fontWeight: 700 }}>R</div>
+          <div style={{ fontFamily: "'Source Serif 4', serif", fontWeight: 600, fontSize: 15, color: "#1C2B24" }}>RKAS &amp; Realisasi</div>
+        </button>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 12, fontSize: 13, color: "#6B6355" }}>
+          <span>Halo, <strong style={{ color: "#1C2B24" }}>{user.nama}</strong></span>
+          <button onClick={onLogout} style={{ background: "#F0EDE4", border: "none", borderRadius: 7, padding: "7px 12px", fontSize: 12, cursor: "pointer", color: "#3A362E" }}>🚪 Keluar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HomeMenu({ onNavigate }) {
+  const items = [
+    { k: "rkas", icon: "📑", title: "RKAS", sub: "Rencana Anggaran" },
+    { k: "realisasi", icon: "📝", title: "Realisasi", sub: "Pencatatan Aktual" },
+    { k: "akun", icon: "⚙️", title: "Pengaturan Akun", sub: "Kelola profil & kata sandi" },
+  ];
+  return (
+    <div style={{ maxWidth: 720, margin: "0 auto", padding: "48px 20px" }}>
+      <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 22, fontWeight: 600, marginBottom: 4 }}>Menu Utama</div>
+      <div style={{ fontSize: 13, color: "#6B6355", marginBottom: 24 }}>Pilih bagian yang ingin dibuka.</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14 }}>
+        {items.map(it => (
+          <button key={it.k} onClick={() => onNavigate(it.k)} style={{ textAlign: "left", background: "#fff", border: "1px solid #E4DFD3", borderRadius: 12, padding: 20, cursor: "pointer" }}>
+            <div style={{ fontSize: 26, marginBottom: 8 }}>{it.icon}</div>
+            <div style={{ fontFamily: "'Source Serif 4', serif", fontWeight: 600, fontSize: 16 }}>{it.title}</div>
+            <div style={{ fontSize: 12, color: "#6B6355", marginTop: 2 }}>{it.sub}</div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AccountSettings({ user, onUpdate }) {
+  const [nama, setNama] = useState(user.nama); const [email, setEmail] = useState(user.email || "");
+  const [pass, setPass] = useState(""); const [pass2, setPass2] = useState(""); const [msg, setMsg] = useState("");
+
+  const save = async () => {
+    setMsg("");
+    if (pass && pass !== pass2) { setMsg("⚠️ Kata sandi tidak sama, silakan ketik ulang"); return; }
+    let accounts = [];
+    try { const r = await storage.get("auth-accounts"); accounts = r ? JSON.parse(r.value) : []; } catch (e) {}
+    const idx = accounts.findIndex(a => a.username === user.username);
+    if (idx >= 0) {
+      accounts[idx] = { ...accounts[idx], nama, email, pass: pass ? simpleHash(pass) : accounts[idx].pass };
+      await storage.set("auth-accounts", JSON.stringify(accounts));
+      onUpdate(accounts[idx]);
+      setMsg("✅ Perubahan disimpan"); setPass(""); setPass2("");
+    }
+  };
+
+  return (
+    <div style={{ maxWidth: 480, margin: "0 auto", padding: "40px 20px" }}>
+      <div style={{ fontFamily: "'Source Serif 4', serif", fontSize: 20, fontWeight: 600, marginBottom: 18 }}>⚙️ Pengaturan Akun</div>
+      <div style={{ background: "#fff", border: "1px solid #E4DFD3", borderRadius: 12, padding: 22 }}>
+        <TextField label="Nama Lengkap" value={nama} onChange={setNama} />
+        <TextField label="Email" value={email} onChange={setEmail} optional />
+        <TextField label="Kata Sandi Baru" type="password" value={pass} onChange={setPass} optional />
+        <TextField label="Ulangi Kata Sandi Baru" type="password" value={pass2} onChange={setPass2} optional />
+        {msg && <div style={{ fontSize: 12, marginBottom: 10 }}>{msg}</div>}
+        <PrimaryBtn onClick={save}>Simpan Perubahan</PrimaryBtn>
+      </div>
+    </div>
+  );
+}
+
+/* ================= RKAS TAB ================= */
+function RkasApp({ year, years, setYear, onNewYear }) {
+  const [ready, setReady] = useState(false);
+  const [plan, setPlan] = useState(emptyPlan());
+  const fileInputRef = useRef(null);
+  const [uploadTarget, setUploadTarget] = useState(null);
+  const [toast, setToast] = useState(null);
+  const showToast = (m) => { setToast(m); setTimeout(() => setToast(null), 2600); };
+
+  useEffect(() => {
+    if (!year) return;
+    setReady(false);
+    (async () => {
+      try { const p = await storage.get(`rkas-plan:${year}`); setPlan(p ? JSON.parse(p.value) : emptyPlan()); }
+      catch (e) { setPlan(emptyPlan()); }
+      setReady(true);
+    })();
+  }, [year]);
+
+  const savePlan = useCallback(async (next) => {
+    setPlan(next);
+    try { await storage.set(`rkas-plan:${year}`, JSON.stringify(next)); }
+    catch (e) { showToast("Gagal menyimpan — coba lagi."); }
+  }, [year]);
+
+  const totalPemasukanRencana = useMemo(() => INCOME_SOURCES.reduce((s, i) => s + (plan.pemasukan[i.key] || 0), 0), [plan]);
+  const totalPengeluaranRencana = useMemo(() => CATEGORIES.reduce((s, c) => s + (plan.pengeluaran[c.key] || 0), 0), [plan]);
+  const sisaRencana = totalPemasukanRencana - totalPengeluaranRencana;
+
+  const setAnggaranMode = (mode) => savePlan({ ...plan, inputMode: mode });
+  const setSem = (which, val) => {
+    const s1 = which === "sem1" ? val : plan.sem1;
+    const s2 = which === "sem2" ? val : plan.sem2;
+    savePlan({ ...plan, sem1: s1, sem2: s2, anggaranTahunan: s1 + s2 });
+  };
+  const setTahunan = (val) => savePlan({ ...plan, anggaranTahunan: val, sem1: Math.round(val / 2), sem2: val - Math.round(val / 2) });
+  const setPemasukan = (key, val) => savePlan({ ...plan, pemasukan: { ...plan.pemasukan, [key]: val } });
+  const setPengeluaran = (key, val) => savePlan({ ...plan, pengeluaran: { ...plan.pengeluaran, [key]: val } });
+
+  const parseFile = (file) => new Promise((resolve, reject) => {
+    const ext = file.name.split(".").pop().toLowerCase();
+    if (ext === "csv") {
+      Papa.parse(file, { header: true, skipEmptyLines: true, complete: (res) => resolve(res.data), error: reject });
+    } else {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try { const wb = XLSX.read(e.target.result, { type: "array" }); const sheet = wb.Sheets[wb.SheetNames[0]]; resolve(XLSX.utils.sheet_to_json(sheet, { defval: "" })); }
+        catch (err) { reject(err); }
+      };
+      reader.onerror = reject; reader.readAsArrayBuffer(file);
+    }
+  });
+
+  const handleUpload = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    try {
+      const rows = await parseFile(file);
+      if (uploadTarget === "pemasukan-plan") {
+        const p = { ...plan.pemasukan };
+        rows.forEach(r => { const s = sourceByLabel(r["Sumber Dana"]); if (s) p[s.key] = toNumber(r["Rencana Anggaran Tahunan"]); });
+        await savePlan({ ...plan, pemasukan: p }); showToast("Rencana pemasukan berhasil diunggah.");
+      } else if (uploadTarget === "pengeluaran-plan") {
+        const p = { ...plan.pengeluaran };
+        rows.forEach(r => { const c = catByLabel(r["Kategori"]); if (c) p[c.key] = toNumber(r["Jumlah Anggaran Tahunan"]); });
+        await savePlan({ ...plan, pengeluaran: p }); showToast("Rencana pengeluaran berhasil diunggah.");
+      }
+    } catch (err) { showToast("Gagal membaca file. Periksa format kolom."); }
+    e.target.value = "";
+  };
+  const triggerUpload = (target) => { setUploadTarget(target); fileInputRef.current?.click(); };
+  const downloadTemplate = (target) => {
+    if (target === "pemasukan-plan") downloadCSV("template_rencana_pemasukan.csv", [["Sumber Dana","Rencana Anggaran Tahunan"], ...INCOME_SOURCES.map(s => [s.label, "0"])]);
+    if (target === "pengeluaran-plan") downloadCSV("template_rencana_pengeluaran.csv", [["Kategori","Batas %","Jumlah Anggaran Tahunan","Sem 1","Sem 2"], ...CATEGORIES.map(c => [c.label, c.limitType==="none"?"Bebas":`${c.limitType==="max"?"Maks":"Min"} ${c.limitPct}%`, "0","0","0"])]);
+  };
+
+  if (!ready) return <Loading msg="Memuat data RKAS..." />;
+  const monthlyIncome = totalPemasukanRencana / 12, monthlyExpense = totalPengeluaranRencana / 12;
+
+  return (
+    <div>
+      <input type="file" accept=".csv,.xlsx,.xls" ref={fileInputRef} style={{ display: "none" }} onChange={handleUpload} />
+      {toast && <div style={{ position: "fixed", bottom: 18, left: "50%", transform: "translateX(-50%)", background: "#1C2B24", color: "#fff", fontSize: 13, padding: "10px 16px", borderRadius: 8, zIndex: 50 }}>{toast}</div>}
+
+      <Section icon="🗓️" title="1.1 Data Rencana Anggaran" subtitle="Tetapkan anggaran tahunan sebagai acuan batas kategori">
+        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+          <button onClick={() => setAnggaranMode("A")} style={{ padding: "7px 12px", borderRadius: 7, fontSize: 12, fontWeight: 500, cursor: "pointer", ...(plan.inputMode === "A" ? { background: "#1F6F50", color: "#fff", border: "1px solid #1F6F50" } : { background: "#fff", border: "1px solid #E4DFD3", color: "#6B6355" }) }}>Cara A: Isi per Semester</button>
+          <button onClick={() => setAnggaranMode("B")} style={{ padding: "7px 12px", borderRadius: 7, fontSize: 12, fontWeight: 500, cursor: "pointer", ...(plan.inputMode === "B" ? { background: "#1F6F50", color: "#fff", border: "1px solid #1F6F50" } : { background: "#fff", border: "1px solid #E4DFD3", color: "#6B6355" }) }}>Cara B: Isi Total Tahunan</button>
+        </div>
+        {plan.inputMode === "A" ? (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <label style={{ fontSize: 13 }}>Semester 1<MoneyInput value={plan.sem1} onChange={v => setSem("sem1", v)} className="wfull" style={{width:"100%",marginTop:4}} /></label>
+            <label style={{ fontSize: 13 }}>Semester 2<MoneyInput value={plan.sem2} onChange={v => setSem("sem2", v)} style={{width:"100%",marginTop:4}} /></label>
+          </div>
+        ) : (
+          <label style={{ fontSize: 13, display: "block" }}>Anggaran Tahunan<MoneyInput value={plan.anggaranTahunan} onChange={setTahunan} style={{width:"100%",marginTop:4}} /></label>
+        )}
+        <div style={{ marginTop: 12, fontSize: 13, fontWeight: 600, color: "#1F6F50" }}>Anggaran Tahunan: {fmtRp(plan.anggaranTahunan)} · Sem 1: {fmtRp(plan.sem1)} · Sem 2: {fmtRp(plan.sem2)}</div>
+      </Section>
+
+      <Section icon="💰" title="1.2 Rencana Pemasukan" subtitle="Sumber dana yang direncanakan tahun ini">
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 12 }}>
+          <button onClick={() => downloadTemplate("pemasukan-plan")} style={{ fontSize: 12, padding: "6px 10px", borderRadius: 7, border: "1px solid #E4DFD3", background: "#fff", color: "#6B6355", cursor: "pointer" }}>⬇ Contoh File</button>
+          <button onClick={() => triggerUpload("pemasukan-plan")} style={{ fontSize: 12, padding: "6px 10px", borderRadius: 7, border: "none", background: "#1F6F50", color: "#fff", cursor: "pointer" }}>⬆ Unggah</button>
+        </div>
+        <div>
+          {INCOME_SOURCES.map(s => (
+            <div key={s.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 8 }}>
+              <span style={{ fontSize: 14 }}>{s.label}</span>
+              <MoneyInput value={plan.pemasukan[s.key]} onChange={v => setPemasukan(s.key, v)} style={{ width: 160 }} />
+            </div>
+          ))}
+          <div style={{ display: "flex", justifyContent: "space-between", paddingTop: 10, borderTop: "1px solid #F0EDE4", fontWeight: 600, fontSize: 14 }}>
+            <span>Total Rencana Pemasukan</span><span style={{ color: "#1F6F50" }}>{fmtRp(totalPemasukanRencana)}</span>
+          </div>
+        </div>
+      </Section>
+
+      <Section icon="🧾" title="1.3 Rencana Pengeluaran" subtitle="Kategori otomatis, persentase dihitung dari anggaran tahunan">
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 12 }}>
+          <button onClick={() => downloadTemplate("pengeluaran-plan")} style={{ fontSize: 12, padding: "6px 10px", borderRadius: 7, border: "1px solid #E4DFD3", background: "#fff", color: "#6B6355", cursor: "pointer" }}>⬇ Contoh File</button>
+          <button onClick={() => triggerUpload("pengeluaran-plan")} style={{ fontSize: 12, padding: "6px 10px", borderRadius: 7, border: "none", background: "#1F6F50", color: "#fff", cursor: "pointer" }}>⬆ Unggah</button>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", fontSize: 13, borderCollapse: "collapse", minWidth: 560 }}>
+            <thead><tr style={{ fontSize: 11, color: "#6B6355", textAlign: "left" }}>
+              <th style={{ padding: "6px 4px" }}>Kategori</th><th style={{ padding: "6px 4px" }}>Batas</th>
+              <th style={{ padding: "6px 4px", textAlign: "right" }}>Jumlah Anggaran (Tahunan)</th>
+              <th style={{ padding: "6px 4px", textAlign: "right" }}>Sem 1</th><th style={{ padding: "6px 4px", textAlign: "right" }}>Sem 2</th>
+            </tr></thead>
+            <tbody>
+              {CATEGORIES.map(c => {
+                const jumlah = plan.pengeluaran[c.key] || 0;
+                const pct = plan.anggaranTahunan > 0 ? (jumlah / plan.anggaranTahunan) * 100 : 0;
+                return (
+                  <tr key={c.key} style={{ borderTop: "1px solid #F0EDE4" }}>
+                    <td style={{ padding: "8px 4px" }}>
+                      <span style={{ marginRight: 4 }}>{c.icon}</span>{c.label}
+                      {c.limitType !== "none" && <div style={{ fontSize: 10, color: "#6B6355" }}>{pct.toFixed(1)}% dari anggaran tahunan</div>}
+                    </td>
+                    <td style={{ padding: "8px 4px", fontSize: 11, color: "#6B6355" }}>{c.limitType === "none" ? "Bebas" : `${c.limitType === "max" ? "Maks" : "Min"} ${c.limitPct}%`}</td>
+                    <td style={{ padding: "8px 4px" }}><MoneyInput value={jumlah} onChange={v => setPengeluaran(c.key, v)} style={{ width: 140 }} /></td>
+                    <td style={{ padding: "8px 4px", textAlign: "right", color: "#6B6355" }}>{fmtRp(jumlah / 2)}</td>
+                    <td style={{ padding: "8px 4px", textAlign: "right", color: "#6B6355" }}>{fmtRp(jumlah - Math.round(jumlah / 2))}</td>
+                  </tr>
+                );
+              })}
+              <tr style={{ borderTop: "1px solid #E4DFD3", fontWeight: 600 }}>
+                <td style={{ padding: "8px 4px" }}>TOTAL</td><td></td>
+                <td style={{ padding: "8px 4px", textAlign: "right", color: "#1F6F50" }}>{fmtRp(totalPengeluaranRencana)}</td>
+                <td style={{ padding: "8px 4px", textAlign: "right" }}>{fmtRp(totalPengeluaranRencana / 2)}</td>
+                <td style={{ padding: "8px 4px", textAlign: "right" }}>{fmtRp(totalPengeluaranRencana - Math.round(totalPengeluaranRencana / 2))}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        {CATEGORIES.filter(c => c.limitType !== "none").map(c => {
+          const jumlah = plan.pengeluaran[c.key] || 0;
+          const pct = plan.anggaranTahunan > 0 ? (jumlah / plan.anggaranTahunan) * 100 : 0;
+          if (c.limitType === "max" && pct > c.limitPct) return <Warning key={c.key} type="warn">{c.label}: melebihi batas maksimal {c.limitPct}% ({pct.toFixed(1)}%).</Warning>;
+          if (c.limitType === "min" && plan.anggaranTahunan > 0 && pct < c.limitPct) return <Warning key={c.key} type="info">{c.label}: minimal harus {c.limitPct}% dari anggaran tahunan (saat ini {pct.toFixed(1)}%).</Warning>;
+          return null;
+        })}
+        <div style={{ marginTop: 12, fontSize: 11, color: "#6B6355" }}>📖 Contoh belanja: {CATEGORIES.map(c => `${c.label} (${c.contoh.split(",").slice(0,3).join(",")})`).join(" · ")}</div>
+      </Section>
+
+      <Section icon="📊" title="1.4 Laporan RKAS" subtitle={`Tahun anggaran ${year} — hanya rencana, tidak ada realisasi`}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px,1fr))", gap: 12, marginBottom: 16 }}>
+          <StatCard label="Rencana Pemasukan" value={totalPemasukanRencana} color="#1F6F50" />
+          <StatCard label="Rencana Pengeluaran" value={totalPengeluaranRencana} color="#C0392B" />
+          <StatCard label="Sisa Rencana" value={sisaRencana} color="#C08A28" />
+        </div>
+        {CATEGORIES.filter(c => c.limitType !== "none").map(c => {
+          const jumlah = plan.pengeluaran[c.key] || 0;
+          const pct = plan.anggaranTahunan > 0 ? (jumlah / plan.anggaranTahunan) * 100 : 0;
+          if (c.limitType === "max" && pct > c.limitPct) return <Warning key={c.key} type="warn">{c.label}: melebihi batas maksimal {c.limitPct}%.</Warning>;
+          if (c.limitType === "min" && plan.anggaranTahunan > 0 && pct < c.limitPct) return <Warning key={c.key} type="info">{c.label}: minimal harus {c.limitPct}% dari anggaran tahunan.</Warning>;
+          return null;
+        })}
+        <div style={{ fontSize: 11, color: "#6B6355", margin: "12px 0 8px" }}>Rincian per bulan dibagi rata dari total tahunan.</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", fontSize: 13, borderCollapse: "collapse", minWidth: 480 }}>
+            <thead><tr style={{ fontSize: 11, color: "#6B6355", textAlign: "left" }}><th style={{ padding: "5px 4px" }}>Bulan</th><th style={{ padding: "5px 4px", textAlign: "right" }}>Pemasukan</th><th style={{ padding: "5px 4px", textAlign: "right" }}>Pengeluaran</th><th style={{ padding: "5px 4px", textAlign: "right" }}>Sisa</th></tr></thead>
+            <tbody>
+              {MONTHS.map(m => (
+                <tr key={m} style={{ borderTop: "1px solid #F0EDE4" }}>
+                  <td style={{ padding: "5px 4px" }}>{m}</td>
+                  <td style={{ padding: "5px 4px", textAlign: "right" }}>{fmtRp(monthlyIncome)}</td>
+                  <td style={{ padding: "5px 4px", textAlign: "right" }}>{fmtRp(monthlyExpense)}</td>
+                  <td style={{ padding: "5px 4px", textAlign: "right" }}>{fmtRp(monthlyIncome - monthlyExpense)}</td>
+                </tr>
+              ))}
+              <tr style={{ borderTop: "1px solid #E4DFD3", fontWeight: 600 }}>
+                <td style={{ padding: "5px 4px" }}>TOTAL TAHUNAN</td>
+                <td style={{ padding: "5px 4px", textAlign: "right" }}>{fmtRp(totalPemasukanRencana)}</td>
+                <td style={{ padding: "5px 4px", textAlign: "right" }}>{fmtRp(totalPengeluaranRencana)}</td>
+                <td style={{ padding: "5px 4px", textAlign: "right" }}>{fmtRp(sisaRencana)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </Section>
+    </div>
+  );
+}
+
+/* ================= REALISASI TAB ================= */
+function RealisasiApp({ year, plan }) {
+  const [ready, setReady] = useState(false);
+  const [real, setReal] = useState(emptyRealisasi());
+  const fileInputRef = useRef(null);
+  const [toast, setToast] = useState(null);
+  const showToast = (m) => { setToast(m); setTimeout(() => setToast(null), 2600); };
+
+  useEffect(() => {
+    if (!year) return;
+    setReady(false);
+    (async () => {
+      try { const r = await storage.get(`realisasi:${year}`); setReal(r ? JSON.parse(r.value) : emptyRealisasi()); }
+      catch (e) { setReal(emptyRealisasi()); }
+      setReady(true);
+    })();
+  }, [year]);
+
+  const saveReal = useCallback(async (next) => {
+    setReal(next);
+    try { await storage.set(`realisasi:${year}`, JSON.stringify(next)); }
+    catch (e) { showToast("Gagal menyimpan — coba lagi."); }
+  }, [year]);
+
+  const addIncomeRow = () => saveReal({ ...real, pemasukan: [...real.pemasukan, { id: uid(), tanggal: new Date().toISOString().slice(0,10), sumber: INCOME_SOURCES[0].key, nominal: 0, ceklis: false, keterangan: "" }] });
+  const updateIncomeRow = (id, patch) => saveReal({ ...real, pemasukan: real.pemasukan.map(r => r.id === id ? { ...r, ...patch } : r) });
+  const deleteIncomeRow = (id) => saveReal({ ...real, pemasukan: real.pemasukan.filter(r => r.id !== id) });
+
+  const addExpenseRow = () => saveReal({ ...real, pengeluaran: [...real.pengeluaran, { id: uid(), tanggal: new Date().toISOString().slice(0,10), nama: "", kategori: CATEGORIES[0].key, nominalBulanan: 0, dari: 1, sampai: 1, bulan: Array(12).fill(0), ceklis: false }] });
+  const updateExpenseRow = (id, patch) => saveReal({ ...real, pengeluaran: real.pengeluaran.map(r => r.id === id ? { ...r, ...patch } : r) });
+  const deleteExpenseRow = (id) => saveReal({ ...real, pengeluaran: real.pengeluaran.filter(r => r.id !== id) });
+  const applyFill = (row) => { const bulan = Array(12).fill(0); for (let m = row.dari; m <= row.sampai; m++) bulan[m - 1] = row.nominalBulanan; updateExpenseRow(row.id, { bulan }); };
+  const setMonthCell = (row, idx, val) => { const bulan = [...row.bulan]; bulan[idx] = val; updateExpenseRow(row.id, { bulan }); };
+
+  const incomeMonthly = useMemo(() => { const arr = Array(12).fill(0); real.pemasukan.forEach(r => { arr[monthIndexFromDate(r.tanggal)] += (r.nominal || 0); }); return arr; }, [real]);
+  const totalIncomeReal = incomeMonthly.reduce((a,b)=>a+b,0);
+  const expenseMonthly = useMemo(() => { const arr = Array(12).fill(0); real.pengeluaran.forEach(r => r.bulan.forEach((v,i) => arr[i] += (v||0))); return arr; }, [real]);
+  const totalExpenseReal = expenseMonthly.reduce((a,b)=>a+b,0);
+  const expenseByCategory = useMemo(() => { const map = {}; CATEGORIES.forEach(c => map[c.key]=0); real.pengeluaran.forEach(r => { map[r.kategori] = (map[r.kategori]||0) + r.bulan.reduce((a,b)=>a+b,0); }); return map; }, [real]);
+
+  const parseFile = (file) => new Promise((resolve, reject) => {
+    const ext = file.name.split(".").pop().toLowerCase();
+    if (ext === "csv") { Papa.parse(file, { header: true, skipEmptyLines: true, complete: (res) => resolve(res.data), error: reject }); }
+    else { const reader = new FileReader(); reader.onload = (e) => { try { const wb = XLSX.read(e.target.result, { type: "array" }); resolve(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: "" })); } catch (err) { reject(err); } }; reader.onerror = reject; reader.readAsArrayBuffer(file); }
+  });
+  const handleUpload = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    try {
+      const rows = await parseFile(file);
+      const income = [...real.pemasukan], expense = [...real.pengeluaran];
+      rows.forEach(r => {
+        const jenis = String(r["Jenis"] || "").toLowerCase();
+        const tanggal = r["Tanggal"] || new Date().toISOString().slice(0,10);
+        if (jenis.includes("pemasukan")) {
+          const s = sourceByLabel(r["Nama/Sumber"]) || sourceByLabel(r["Kategori"]);
+          income.push({ id: uid(), tanggal, sumber: s ? s.key : INCOME_SOURCES[0].key, nominal: toNumber(r["Nominal"]), ceklis: false, keterangan: r["Nama/Sumber"] || "" });
+        } else if (jenis.includes("pengeluaran")) {
+          const c = catByLabel(r["Kategori"]); const bulan = Array(12).fill(0); let any = false;
+          MONTHS_SHORT.forEach((m,i) => { if (r[m] !== undefined && r[m] !== "") { bulan[i] = toNumber(r[m]); any = true; } });
+          if (!any) bulan[monthIndexFromDate(tanggal)] = toNumber(r["Nominal"]);
+          expense.push({ id: uid(), tanggal, nama: r["Nama/Sumber"] || "", kategori: c ? c.key : CATEGORIES[0].key, nominalBulanan: toNumber(r["Nominal"]), dari: 1, sampai: 12, bulan, ceklis: false });
+        }
+      });
+      await saveReal({ pemasukan: income, pengeluaran: expense });
+      showToast("Data realisasi berhasil diunggah.");
+    } catch (err) { showToast("Gagal membaca file. Periksa format kolom."); }
+    e.target.value = "";
+  };
+  const downloadTemplate = () => downloadCSV("template_realisasi.csv", [["No","Tanggal","Jenis","Nama/Sumber","Kategori","Nominal", ...MONTHS_SHORT]]);
+
+  if (!ready) return <Loading msg="Memuat data realisasi..." />;
+
+  return (
+    <div>
+      <input type="file" accept=".csv,.xlsx,.xls" ref={fileInputRef} style={{ display: "none" }} onChange={handleUpload} />
+      {toast && <div style={{ position: "fixed", bottom: 18, left: "50%", transform: "translateX(-50%)", background: "#1C2B24", color: "#fff", fontSize: 13, padding: "10px 16px", borderRadius: 8, zIndex: 50 }}>{toast}</div>}
+
+      <Section icon="💵" title="2.1 Realisasi Pemasukan" subtitle="Catatan dana yang benar-benar diterima">
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 12 }}>
+          <button onClick={downloadTemplate} style={{ fontSize: 12, padding: "6px 10px", borderRadius: 7, border: "1px solid #E4DFD3", background: "#fff", color: "#6B6355", cursor: "pointer" }}>⬇ Contoh File</button>
+          <button onClick={() => fileInputRef.current?.click()} style={{ fontSize: 12, padding: "6px 10px", borderRadius: 7, border: "1px solid #E4DFD3", background: "#fff", color: "#6B6355", cursor: "pointer" }}>⬆ Unggah</button>
+          <button onClick={addIncomeRow} style={{ fontSize: 12, padding: "6px 10px", borderRadius: 7, border: "none", background: "#1F6F50", color: "#fff", cursor: "pointer" }}>✚ Tambah</button>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", fontSize: 13, borderCollapse: "collapse", minWidth: 600 }}>
+            <thead><tr style={{ fontSize: 11, color: "#6B6355", textAlign: "left" }}><th style={{padding:"5px 4px"}}>Tanggal</th><th style={{padding:"5px 4px"}}>Sumber Dana</th><th style={{padding:"5px 4px", textAlign:"right"}}>Nominal</th><th style={{padding:"5px 4px"}}>Keterangan</th><th style={{padding:"5px 4px", textAlign:"center"}}>✓</th><th></th></tr></thead>
+            <tbody>
+              {real.pemasukan.length === 0 && <tr><td colSpan={6} style={{ padding: "20px 4px", textAlign: "center", fontSize: 12, color: "#6B6355" }}>Belum ada catatan pemasukan.</td></tr>}
+              {real.pemasukan.map(r => (
+                <tr key={r.id} style={{ borderTop: "1px solid #F0EDE4" }}>
+                  <td style={{padding:"5px 4px"}}><input type="date" value={r.tanggal} onChange={e => updateIncomeRow(r.id, { tanggal: e.target.value })} style={{ padding: "5px 6px", borderRadius: 6, border: "1px solid #E4DFD3", fontSize: 12 }} /></td>
+                  <td style={{padding:"5px 4px"}}><select value={r.sumber} onChange={e => updateIncomeRow(r.id, { sumber: e.target.value })} style={{ padding: "5px 6px", borderRadius: 6, border: "1px solid #E4DFD3", fontSize: 12 }}>{INCOME_SOURCES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}</select></td>
+                  <td style={{padding:"5px 4px"}}><MoneyInput value={r.nominal} onChange={v => updateIncomeRow(r.id, { nominal: v })} style={{ width: 130 }} /></td>
+                  <td style={{padding:"5px 4px"}}><input value={r.keterangan} onChange={e => updateIncomeRow(r.id, { keterangan: e.target.value })} placeholder="Catatan" style={{ padding: "5px 6px", borderRadius: 6, border: "1px solid #E4DFD3", fontSize: 12, width: "100%" }} /></td>
+                  <td style={{padding:"5px 4px", textAlign:"center"}}><button onClick={() => updateIncomeRow(r.id, { ceklis: !r.ceklis })} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 15, color: r.ceklis ? "#1F6F50" : "#C7C1B3" }}>{r.ceklis ? "✓" : "○"}</button></td>
+                  <td style={{padding:"5px 4px"}}><button onClick={() => deleteIncomeRow(r.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#C0392B" }}>🗑</button></td>
+                </tr>
+              ))}
+              {real.pemasukan.length > 0 && <tr style={{ borderTop: "1px solid #E4DFD3", fontWeight: 600 }}><td colSpan={2} style={{padding:"5px 4px"}}>TOTAL PEMASUKAN</td><td style={{padding:"5px 4px", textAlign:"right"}}>{fmtRp(totalIncomeReal)}</td><td colSpan={3}></td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </Section>
+
+      <Section icon="🧾" title="2.2 Realisasi Pengeluaran" subtitle="Isi nominal per bulan, atau isi otomatis untuk rentang bulan sekaligus">
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+          <button onClick={addExpenseRow} style={{ fontSize: 12, padding: "6px 10px", borderRadius: 7, border: "none", background: "#1F6F50", color: "#fff", cursor: "pointer" }}>✚ Tambah Belanja</button>
+        </div>
+        {real.pengeluaran.length === 0 && <div style={{ padding: "20px 4px", textAlign: "center", fontSize: 12, color: "#6B6355", border: "1px solid #F0EDE4", borderRadius: 8 }}>Belum ada catatan pengeluaran.</div>}
+        {real.pengeluaran.map(r => {
+          const rowTotal = r.bulan.reduce((a,b)=>a+b,0);
+          return (
+            <div key={r.id} style={{ border: "1px solid #E4DFD3", borderRadius: 10, padding: 12, marginBottom: 10 }}>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                <input type="date" value={r.tanggal} onChange={e => updateExpenseRow(r.id, { tanggal: e.target.value })} style={{ padding: "5px 6px", borderRadius: 6, border: "1px solid #E4DFD3", fontSize: 12 }} />
+                <input value={r.nama} onChange={e => updateExpenseRow(r.id, { nama: e.target.value })} placeholder="Nama belanja" style={{ padding: "5px 6px", borderRadius: 6, border: "1px solid #E4DFD3", fontSize: 12, flex: 1, minWidth: 120 }} />
+                <select value={r.kategori} onChange={e => updateExpenseRow(r.id, { kategori: e.target.value })} style={{ padding: "5px 6px", borderRadius: 6, border: "1px solid #E4DFD3", fontSize: 12 }}>{CATEGORIES.map(c => <option key={c.key} value={c.key}>{c.icon} {c.label}</option>)}</select>
+                <button onClick={() => updateExpenseRow(r.id, { ceklis: !r.ceklis })} title="Ceklis" style={{ background: "none", border: "none", cursor: "pointer", fontSize: 16, color: r.ceklis ? "#1F6F50" : "#C7C1B3" }}>{r.ceklis ? "✓" : "○"}</button>
+                <button onClick={() => deleteExpenseRow(r.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#C0392B" }}>🗑</button>
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-end", marginBottom: 8, fontSize: 12 }}>
+                <label>Nominal / bulan<MoneyInput value={r.nominalBulanan} onChange={v => updateExpenseRow(r.id, { nominalBulanan: v })} style={{ width: 130, display: "block", marginTop: 2 }} /></label>
+                <label>Dari<select value={r.dari} onChange={e => updateExpenseRow(r.id, { dari: Number(e.target.value) })} style={{ padding: "6px", borderRadius: 6, border: "1px solid #E4DFD3", display: "block", marginTop: 2 }}>{MONTHS.map((m,i)=><option key={m} value={i+1}>{m}</option>)}</select></label>
+                <label>Sampai<select value={r.sampai} onChange={e => updateExpenseRow(r.id, { sampai: Number(e.target.value) })} style={{ padding: "6px", borderRadius: 6, border: "1px solid #E4DFD3", display: "block", marginTop: 2 }}>{MONTHS.map((m,i)=><option key={m} value={i+1}>{m}</option>)}</select></label>
+                <button onClick={() => applyFill(r)} style={{ padding: "7px 12px", borderRadius: 7, border: "none", background: "#C08A28", color: "#fff", cursor: "pointer" }}>Terapkan ke Bulan</button>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 4 }}>
+                {MONTHS_SHORT.map((m,i) => (
+                  <div key={m}>
+                    <div style={{ fontSize: 10, color: "#6B6355", textAlign: "center", marginBottom: 2 }}>{m}</div>
+                    <MoneyInput value={r.bulan[i]} onChange={v => setMonthCell(r, i, v)} style={{ width: "100%", padding: "4px", fontSize: 11 }} />
+                  </div>
+                ))}
+              </div>
+              <div style={{ textAlign: "right", fontSize: 12, fontWeight: 600, marginTop: 8, color: "#1F6F50" }}>Total baris: {fmtRp(rowTotal)}</div>
+            </div>
+          );
+        })}
+      </Section>
+
+      <Section icon="📊" title="2.3 Laporan Realisasi" subtitle={`Tahun anggaran ${year} — data aktual saja`}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px,1fr))", gap: 12, marginBottom: 16 }}>
+          <StatCard label="Total Pemasukan" value={totalIncomeReal} color="#1F6F50" />
+          <StatCard label="Total Pengeluaran" value={totalExpenseReal} color="#C0392B" />
+          <StatCard label="Saldo Akhir" value={totalIncomeReal - totalExpenseReal} color="#C08A28" />
+        </div>
+        <div style={{ overflowX: "auto", marginBottom: 20 }}>
+          <table style={{ width: "100%", fontSize: 13, borderCollapse: "collapse", minWidth: 480 }}>
+            <thead><tr style={{ fontSize: 11, color: "#6B6355", textAlign: "left" }}><th style={{padding:"5px 4px"}}>Bulan</th><th style={{padding:"5px 4px", textAlign:"right"}}>Pemasukan</th><th style={{padding:"5px 4px", textAlign:"right"}}>Pengeluaran</th><th style={{padding:"5px 4px", textAlign:"right"}}>Saldo</th></tr></thead>
+            <tbody>
+              {MONTHS.map((m,i) => (
+                <tr key={m} style={{ borderTop: "1px solid #F0EDE4" }}>
+                  <td style={{padding:"5px 4px"}}>{m}</td>
+                  <td style={{padding:"5px 4px", textAlign:"right"}}>{fmtRp(incomeMonthly[i])}</td>
+                  <td style={{padding:"5px 4px", textAlign:"right"}}>{fmtRp(expenseMonthly[i])}</td>
+                  <td style={{padding:"5px 4px", textAlign:"right"}}>{fmtRp(incomeMonthly[i]-expenseMonthly[i])}</td>
+                </tr>
+              ))}
+              <tr style={{ borderTop: "1px solid #E4DFD3", fontWeight: 600 }}>
+                <td style={{padding:"5px 4px"}}>TOTAL TAHUNAN</td>
+                <td style={{padding:"5px 4px", textAlign:"right"}}>{fmtRp(totalIncomeReal)}</td>
+                <td style={{padding:"5px 4px", textAlign:"right"}}>{fmtRp(totalExpenseReal)}</td>
+                <td style={{padding:"5px 4px", textAlign:"right"}}>{fmtRp(totalIncomeReal-totalExpenseReal)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>Realisasi Pengeluaran per Kategori</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", fontSize: 13, borderCollapse: "collapse", minWidth: 420 }}>
+            <thead><tr style={{ fontSize: 11, color: "#6B6355", textAlign: "left" }}><th style={{padding:"5px 4px"}}>Kategori</th><th style={{padding:"5px 4px", textAlign:"right"}}>Realisasi</th><th style={{padding:"5px 4px", textAlign:"right"}}>% dari Rencana</th></tr></thead>
+            <tbody>
+              {CATEGORIES.map(c => {
+                const realisasi = expenseByCategory[c.key] || 0, rencana = plan.pengeluaran[c.key] || 0;
+                const pct = rencana > 0 ? (realisasi / rencana) * 100 : 0;
+                return (<tr key={c.key} style={{ borderTop: "1px solid #F0EDE4" }}><td style={{padding:"5px 4px"}}>{c.icon} {c.label}</td><td style={{padding:"5px 4px", textAlign:"right"}}>{fmtRp(realisasi)}</td><td style={{padding:"5px 4px", textAlign:"right"}}>{rencana > 0 ? `${pct.toFixed(1)}%` : "—"}</td></tr>);
+              })}
+              <tr style={{ borderTop: "1px solid #E4DFD3", fontWeight: 600 }}><td style={{padding:"5px 4px"}}>TOTAL</td><td style={{padding:"5px 4px", textAlign:"right"}}>{fmtRp(totalExpenseReal)}</td><td></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </Section>
+    </div>
+  );
+}
+
+/* ================= APP UTAMA ================= */
+function MainApp({ user, onLogout, onUserUpdate }) {
+  const [page, setPage] = useState("home");
+  const [years, setYears] = useState([]);
+  const [year, setYear] = useState(null);
+  const [plan, setPlan] = useState(emptyPlan());
+  const [showNewYear, setShowNewYear] = useState(false);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await storage.get("rkas-years");
+        const list = res ? JSON.parse(res.value) : [];
+        if (list.length === 0) {
+          const y = String(new Date().getFullYear());
+          setYears([y]); setYear(y);
+          await storage.set("rkas-years", JSON.stringify([y]));
+        } else { setYears(list); setYear(list[list.length - 1]); }
+      } catch (e) { const y = String(new Date().getFullYear()); setYears([y]); setYear(y); }
+      setReady(true);
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!year) return;
+    (async () => { try { const p = await storage.get(`rkas-plan:${year}`); setPlan(p ? JSON.parse(p.value) : emptyPlan()); } catch (e) { setPlan(emptyPlan()); } })();
+  }, [year, page]);
+
+  const createYear = async (mode) => {
+    let y = parseInt(years[years.length - 1] || new Date().getFullYear(), 10) + 1; y = String(y);
+    if (years.includes(y)) y = String(parseInt(y) + 1);
+    const newList = [...years, y]; setYears(newList);
+    await storage.set("rkas-years", JSON.stringify(newList));
+    const newPlan = mode === "copy" ? { ...plan } : emptyPlan();
+    await storage.set(`rkas-plan:${y}`, JSON.stringify(newPlan));
+    await storage.set(`realisasi:${y}`, JSON.stringify(emptyRealisasi()));
+    setYear(y); setShowNewYear(false);
+  };
+
+  if (!ready) return <Loading msg="Memuat sistem..." />;
+
+  return (
+    <div style={{ minHeight: "100vh" }}>
+      <TopBar user={user} onLogout={onLogout} onHome={() => setPage("home")} />
+      {(page === "rkas" || page === "realisasi") && (
+        <div style={{ borderBottom: "1px solid #E4DFD3", background: "#fff" }}>
+          <div style={{ maxWidth: 960, margin: "0 auto", padding: "0 20px", display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: 4 }}>
+              <button onClick={() => setPage("rkas")} style={{ padding: "12px 6px", background: "none", border: "none", borderBottom: page === "rkas" ? "2px solid #1F6F50" : "2px solid transparent", color: page === "rkas" ? "#1F6F50" : "#6B6355", fontWeight: 500, fontSize: 13, cursor: "pointer" }}>📑 RKAS</button>
+              <button onClick={() => setPage("realisasi")} style={{ padding: "12px 6px", background: "none", border: "none", borderBottom: page === "realisasi" ? "2px solid #1F6F50" : "2px solid transparent", color: page === "realisasi" ? "#1F6F50" : "#6B6355", fontWeight: 500, fontSize: 13, cursor: "pointer" }}>📝 Realisasi</button>
+            </div>
+            <div style={{ marginLeft: "auto", display: "flex", gap: 8, padding: "10px 0" }}>
+              <select value={year || ""} onChange={e => setYear(e.target.value)} style={{ padding: "6px 8px", borderRadius: 6, border: "1px solid #E4DFD3", fontSize: 12 }}>
+                {years.map(y => <option key={y} value={y}>Tahun {y}</option>)}
+              </select>
+              <button onClick={() => setShowNewYear(true)} style={{ fontSize: 12, padding: "6px 10px", borderRadius: 6, border: "none", background: "#C08A28", color: "#fff", cursor: "pointer" }}>✚ Tahun Baru</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showNewYear && (
+        <div onClick={() => setShowNewYear(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.3)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: "#fff", borderRadius: 12, padding: 22, maxWidth: 340, width: "100%" }}>
+            <div style={{ fontWeight: 600, marginBottom: 4, fontFamily: "'Source Serif 4', serif" }}>Buat Tahun Anggaran Baru</div>
+            <div style={{ fontSize: 12, color: "#6B6355", marginBottom: 16 }}>Data tahun {year} akan tetap tersimpan sebagai arsip.</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <button onClick={() => createYear("copy")} style={{ padding: "10px 14px", borderRadius: 7, border: "none", background: "#1F6F50", color: "#fff", fontSize: 13, textAlign: "left", cursor: "pointer" }}>Lanjut dari rencana tahun ini</button>
+              <button onClick={() => createYear("blank")} style={{ padding: "10px 14px", borderRadius: 7, border: "1px solid #E4DFD3", background: "#fff", fontSize: 13, textAlign: "left", cursor: "pointer" }}>Mulai kosong</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {page === "home" && <HomeMenu onNavigate={setPage} />}
+      {page === "akun" && <AccountSettings user={user} onUpdate={onUserUpdate} />}
+      {page === "rkas" && <div style={{ maxWidth: 900, margin: "0 auto", padding: "20px" }}><RkasApp year={year} years={years} setYear={setYear} /></div>}
+      {page === "realisasi" && <div style={{ maxWidth: 900, margin: "0 auto", padding: "20px" }}><RealisasiApp year={year} plan={plan} /></div>}
+    </div>
+  );
+}
+
+/* ================= ROOT: AUTENTIKASI + SESI ================= */
+function Root() {
+  const [checking, setChecking] = useState(true);
+  const [view, setView] = useState("login");
+  const [user, setUser] = useState(null);
+  const timerRef = useRef(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const s = await storage.get("auth-session");
+        const session = s ? JSON.parse(s.value) : null;
+        if (session) {
+          const r = await storage.get("auth-accounts");
+          const accounts = r ? JSON.parse(r.value) : [];
+          const acc = accounts.find(a => a.username === session.username);
+          if (acc) setUser(acc);
+        }
+      } catch (e) {}
+      setChecking(false);
+    })();
+  }, []);
+
+  const logout = useCallback(async () => {
+    setUser(null); setView("login");
+    try { await storage.delete("auth-session"); } catch (e) {}
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    const reset = () => { clearTimeout(timerRef.current); timerRef.current = setTimeout(logout, INACTIVITY_LIMIT_MS); };
+    ["mousemove","keydown","click","touchstart"].forEach(ev => window.addEventListener(ev, reset));
+    reset();
+    return () => { clearTimeout(timerRef.current); ["mousemove","keydown","click","touchstart"].forEach(ev => window.removeEventListener(ev, reset)); };
+  }, [user, logout]);
+
+  if (checking) return <Loading msg="Memuat..." />;
+  if (!user) {
+    return view === "login"
+      ? <LoginPage onGoRegister={() => setView("register")} onLoggedIn={setUser} />
+      : <RegisterPage onGoLogin={() => setView("login")} onRegistered={() => setView("login")} />;
+  }
+  return <MainApp user={user} onLogout={logout} onUserUpdate={setUser} />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Root />);
+</script>
+</body>
+</html>
