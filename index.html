@@ -61,6 +61,35 @@ const MONTHS_SHORT = ["Jan","Feb","Mar","Apr","Mei","Jun","Jul","Agu","Sep","Okt
 const INACTIVITY_LIMIT_MS = 20 * 60 * 1000;
 
 const emptyPlan = () => ({ anggaranTahunan: 0, sem1: 0, sem2: 0, inputMode: "A", pemasukanRows: [], pengeluaranRows: [] });
+/* Menormalkan & memigrasikan data lama (format berbasis kategori tetap)
+   ke format baru berbasis Nama Kegiatan, supaya data lama tidak menyebabkan error. */
+function normalizePlan(raw) {
+  const base = emptyPlan();
+  if (!raw || typeof raw !== "object") return base;
+  const p = { ...base, ...raw };
+  p.pemasukanRows = Array.isArray(raw.pemasukanRows) ? raw.pemasukanRows : [];
+  p.pengeluaranRows = Array.isArray(raw.pengeluaranRows) ? raw.pengeluaranRows : [];
+  if (p.pemasukanRows.length === 0 && raw.pemasukan && typeof raw.pemasukan === "object") {
+    INCOME_SOURCES.forEach(s => { const v = raw.pemasukan[s.key]; if (v) p.pemasukanRows.push({ id: uid(), namaKegiatan: s.label, sumberDana: s.key, anggaranTahunan: v }); });
+  }
+  if (p.pengeluaranRows.length === 0 && raw.pengeluaran && typeof raw.pengeluaran === "object") {
+    CATEGORIES.forEach(c => { const v = raw.pengeluaran[c.key]; if (v) p.pengeluaranRows.push({ id: uid(), namaKegiatan: c.label, kategori: c.key, anggaranTahunan: v }); });
+  }
+  p.pemasukanRows = p.pemasukanRows.map(r => ({ id: r.id || uid(), namaKegiatan: r.namaKegiatan || "", sumberDana: INCOME_SOURCES.some(s => s.key === r.sumberDana) ? r.sumberDana : INCOME_SOURCES[0].key, anggaranTahunan: Number(r.anggaranTahunan) || 0 }));
+  p.pengeluaranRows = p.pengeluaranRows.map(r => ({ id: r.id || uid(), namaKegiatan: r.namaKegiatan || "", kategori: CATEGORIES.some(c => c.key === r.kategori) ? r.kategori : CATEGORIES[0].key, anggaranTahunan: Number(r.anggaranTahunan) || 0 }));
+  return p;
+}
+/* Menormalkan data realisasi lama supaya tidak menyebabkan error. */
+function normalizeRealisasi(raw) {
+  const base = emptyRealisasi();
+  if (!raw || typeof raw !== "object") return base;
+  const pemasukan = Array.isArray(raw.pemasukan) ? raw.pemasukan : [];
+  const pengeluaran = Array.isArray(raw.pengeluaran) ? raw.pengeluaran : [];
+  return {
+    pemasukan: pemasukan.map(r => ({ id: r.id || uid(), tanggal: r.tanggal || new Date().toISOString().slice(0,10), namaKegiatan: r.namaKegiatan || "", sumber: INCOME_SOURCES.some(s => s.key === r.sumber) ? r.sumber : INCOME_SOURCES[0].key, nominal: Number(r.nominal) || 0, ceklis: !!r.ceklis, keterangan: r.keterangan || "" })),
+    pengeluaran: pengeluaran.map(r => ({ id: r.id || uid(), tanggal: r.tanggal || new Date().toISOString().slice(0,10), namaKegiatan: r.namaKegiatan || "", nama: r.nama || "", kategori: CATEGORIES.some(c => c.key === r.kategori) ? r.kategori : CATEGORIES[0].key, nominalBulanan: Number(r.nominalBulanan) || 0, dari: r.dari || 1, sampai: r.sampai || 1, bulan: Array.isArray(r.bulan) && r.bulan.length === 12 ? r.bulan.map(v => Number(v) || 0) : Array(12).fill(0), ceklis: !!r.ceklis })),
+  };
+}
 const emptyRealisasi = () => ({ pemasukan: [], pengeluaran: [] });
 
 /* ================= util ================= */
@@ -208,6 +237,37 @@ function StatCard({ label, value, color }) {
   );
 }
 function Loading({ msg }) { return <div style={{ minHeight: 300, display: "flex", alignItems: "center", justifyContent: "center", color: "#6B6355", fontSize: 14 }}>{msg}</div>; }
+
+/* Jaring pengaman: kalau bagian ini gagal ditampilkan, tampilkan pesan
+   yang jelas (bukan halaman kosong) dan beri opsi reset data tahun ini. */
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { console.error("Kesalahan tampilan:", error, info); }
+  async resetData() {
+    try {
+      if (this.props.resetKeys) { for (const k of this.props.resetKeys) { await storage.delete(k); } }
+    } catch (e) {}
+    window.location.reload();
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ maxWidth: 480, margin: "60px auto", padding: 24, textAlign: "center" }}>
+          <div style={{ fontSize: 28, marginBottom: 10 }}>⚠️</div>
+          <div style={{ fontWeight: 600, marginBottom: 6, fontFamily: "'Source Serif 4', serif" }}>Bagian ini gagal ditampilkan</div>
+          <div style={{ fontSize: 12, color: "#6B6355", marginBottom: 6 }}>Kemungkinan data tahun ini rusak atau dari format lama.</div>
+          <div style={{ fontSize: 11, color: "#C0392B", background: "#FBEAE6", borderRadius: 8, padding: 10, marginBottom: 16, textAlign: "left", overflowWrap: "break-word" }}>{String((this.state.error && this.state.error.message) || this.state.error)}</div>
+          <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+            <button onClick={() => window.location.reload()} style={{ padding: "9px 14px", borderRadius: 7, border: "1px solid #E4DFD3", background: "#fff", fontSize: 13, cursor: "pointer" }}>Muat Ulang</button>
+            <button onClick={() => this.resetData()} style={{ padding: "9px 14px", borderRadius: 7, border: "none", background: "#C0392B", color: "#fff", fontSize: 13, cursor: "pointer" }}>Reset Data Tahun Ini</button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 function PrimaryBtn({ children, onClick, style }) { return <button onClick={onClick} style={{ background: "#1F6F50", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontWeight: 500, fontSize: 14, cursor: "pointer", ...style }}>{children}</button>; }
 function SmallBtn({ children, onClick, style }) { return <button onClick={onClick} style={{ fontSize: 12, padding: "6px 10px", borderRadius: 7, border: "1px solid #E4DFD3", background: "#fff", color: "#6B6355", cursor: "pointer", ...style }}>{children}</button>; }
 
@@ -413,7 +473,7 @@ function RkasApp({ year }) {
     if (!year) return;
     setReady(false);
     (async () => {
-      try { const p = await storage.get(`rkas-plan:${year}`); setPlan(p ? JSON.parse(p.value) : emptyPlan()); }
+      try { const p = await storage.get(`rkas-plan:${year}`); setPlan(normalizePlan(p ? JSON.parse(p.value) : null)); }
       catch (e) { setPlan(emptyPlan()); }
       setReady(true);
     })();
@@ -657,7 +717,7 @@ function RealisasiApp({ year, plan }) {
   useEffect(() => {
     if (!year) return;
     setReady(false);
-    (async () => { try { const r = await storage.get(`realisasi:${year}`); setReal(r ? JSON.parse(r.value) : emptyRealisasi()); } catch (e) { setReal(emptyRealisasi()); } setReady(true); })();
+    (async () => { try { const r = await storage.get(`realisasi:${year}`); setReal(normalizeRealisasi(r ? JSON.parse(r.value) : null)); } catch (e) { setReal(emptyRealisasi()); } setReady(true); })();
   }, [year]);
 
   const saveReal = useCallback(async (next) => {
@@ -869,7 +929,7 @@ function MainApp({ user, onLogout, onUserUpdate }) {
 
   useEffect(() => {
     if (!year) return;
-    (async () => { try { const p = await storage.get(`rkas-plan:${year}`); setPlan(p ? JSON.parse(p.value) : emptyPlan()); } catch (e) { setPlan(emptyPlan()); } })();
+    (async () => { try { const p = await storage.get(`rkas-plan:${year}`); setPlan(normalizePlan(p ? JSON.parse(p.value) : null)); } catch (e) { setPlan(emptyPlan()); } })();
   }, [year, page]);
 
   const createYear = async (mode) => {
@@ -918,8 +978,8 @@ function MainApp({ user, onLogout, onUserUpdate }) {
 
       {page === "home" && <HomeMenu onNavigate={setPage} />}
       {page === "akun" && <AccountSettings user={user} onUpdate={onUserUpdate} />}
-      {page === "rkas" && <div style={{ maxWidth: 900, margin: "0 auto", padding: "20px" }}><RkasApp year={year} /></div>}
-      {page === "realisasi" && <div style={{ maxWidth: 900, margin: "0 auto", padding: "20px" }}><RealisasiApp year={year} plan={plan} /></div>}
+      {page === "rkas" && <div style={{ maxWidth: 900, margin: "0 auto", padding: "20px" }}><ErrorBoundary key={`rkas-${year}`} resetKeys={[`rkas-plan:${year}`]}><RkasApp year={year} /></ErrorBoundary></div>}
+      {page === "realisasi" && <div style={{ maxWidth: 900, margin: "0 auto", padding: "20px" }}><ErrorBoundary key={`real-${year}`} resetKeys={[`realisasi:${year}`]}><RealisasiApp year={year} plan={plan} /></ErrorBoundary></div>}
     </div>
   );
 }
